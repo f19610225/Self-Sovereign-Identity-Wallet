@@ -6,6 +6,9 @@
 (define-constant ERR_ACCESS_DENIED (err u104))
 (define-constant ERR_EXPIRED (err u105))
 
+(define-data-var min-rating uint u1)
+(define-data-var max-rating uint u5)
+
 (define-map user-profiles
   { user: principal }
   {
@@ -256,4 +259,115 @@
 
 (define-read-only (get-next-request-id)
   (var-get next-request-id)
+)
+
+(define-constant ERR_INVALID_RATING (err u106))
+(define-constant ERR_ALREADY_RATED (err u107))
+(define-constant ERR_CANNOT_RATE_SELF (err u108))
+
+(define-map issuer-ratings
+  { issuer: principal, rater: principal }
+  {
+    rating: uint,
+    comment: (string-ascii 128),
+    created-at: uint
+  }
+)
+
+(define-map issuer-reputation
+  { issuer: principal }
+  {
+    total-ratings: uint,
+    rating-sum: uint,
+    avg-rating: uint,
+    last-updated: uint
+  }
+)
+
+
+(define-public (rate-issuer (issuer principal) (rating uint) (comment (string-ascii 128)))
+  (let ((rater tx-sender))
+    (asserts! (not (is-eq rater issuer)) ERR_CANNOT_RATE_SELF)
+    (asserts! (and (>= rating (var-get min-rating)) (<= rating (var-get max-rating))) ERR_INVALID_RATING)
+    (asserts! (is-none (map-get? issuer-ratings { issuer: issuer, rater: rater })) ERR_ALREADY_RATED)
+    (map-set issuer-ratings
+      { issuer: issuer, rater: rater }
+      {
+        rating: rating,
+        comment: comment,
+        created-at: stacks-block-height
+      }
+    )
+    (unwrap-panic (update-issuer-reputation issuer rating))
+    (ok true)
+  )
+)
+
+(define-public (update-rating (issuer principal) (new-rating uint) (new-comment (string-ascii 128)))
+  (let ((rater tx-sender)
+        (old-rating-data (unwrap! (map-get? issuer-ratings { issuer: issuer, rater: rater }) ERR_NOT_FOUND)))
+    (asserts! (and (>= new-rating (var-get min-rating)) (<= new-rating (var-get max-rating))) ERR_INVALID_RATING)
+    (map-set issuer-ratings
+      { issuer: issuer, rater: rater }
+      {
+        rating: new-rating,
+        comment: new-comment,
+        created-at: stacks-block-height
+      }
+    )
+    (unwrap-panic (adjust-issuer-reputation issuer (get rating old-rating-data) new-rating))
+    (ok true)
+  )
+)
+
+(define-private (update-issuer-reputation (issuer principal) (rating uint))
+  (let ((current-rep (default-to { total-ratings: u0, rating-sum: u0, avg-rating: u0, last-updated: u0 }
+                                  (map-get? issuer-reputation { issuer: issuer })))
+        (new-total (+ (get total-ratings current-rep) u1))
+        (new-sum (+ (get rating-sum current-rep) rating))
+        (new-avg (/ new-sum new-total)))
+    (map-set issuer-reputation
+      { issuer: issuer }
+      {
+        total-ratings: new-total,
+        rating-sum: new-sum,
+        avg-rating: new-avg,
+        last-updated: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-private (adjust-issuer-reputation (issuer principal) (old-rating uint) (new-rating uint))
+  (let ((current-rep (unwrap-panic (map-get? issuer-reputation { issuer: issuer })))
+        (adjusted-sum (+ (- (get rating-sum current-rep) old-rating) new-rating))
+        (new-avg (/ adjusted-sum (get total-ratings current-rep))))
+    (map-set issuer-reputation
+      { issuer: issuer }
+      (merge current-rep
+        {
+          rating-sum: adjusted-sum,
+          avg-rating: new-avg,
+          last-updated: stacks-block-height
+        }
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-issuer-rating (issuer principal) (rater principal))
+  (map-get? issuer-ratings { issuer: issuer, rater: rater })
+)
+
+(define-read-only (get-issuer-reputation (issuer principal))
+  (map-get? issuer-reputation { issuer: issuer })
+)
+
+(define-read-only (get-issuer-avg-rating (issuer principal))
+  (match (map-get? issuer-reputation { issuer: issuer })
+    rep (some (get avg-rating rep))
+    none
+  )
 )
