@@ -6,6 +6,10 @@
 (define-constant ERR_ACCESS_DENIED (err u104))
 (define-constant ERR_EXPIRED (err u105))
 
+(define-constant ERR_INVALID_BACKUP (err u109))
+(define-constant ERR_BACKUP_NOT_FOUND (err u110))
+(define-constant ERR_BACKUP_EXPIRED (err u111))
+
 (define-data-var min-rating uint u1)
 (define-data-var max-rating uint u5)
 
@@ -369,5 +373,80 @@
   (match (map-get? issuer-reputation { issuer: issuer })
     rep (some (get avg-rating rep))
     none
+  )
+)
+
+
+(define-map credential-backups
+  { user: principal, backup-id: uint }
+  {
+    backup-hash: (buff 32),
+    credential-ids: (list 10 (string-ascii 64)),
+    created-at: uint,
+    expires-at: uint,
+    recovery-phrase: (buff 32),
+    is-used: bool
+  }
+)
+
+(define-data-var next-backup-id uint u1)
+
+(define-public (create-backup (credential-ids (list 10 (string-ascii 64))) (recovery-phrase (buff 32)) (duration uint))
+  (let ((user tx-sender)
+        (backup-id (var-get next-backup-id)))
+    (asserts! (is-some (map-get? user-profiles { user: user })) ERR_NOT_FOUND)
+    (asserts! (> (len credential-ids) u0) ERR_INVALID_BACKUP)
+    (map-set credential-backups
+      { user: user, backup-id: backup-id }
+      {
+        backup-hash: (sha256 recovery-phrase),
+        credential-ids: credential-ids,
+        created-at: stacks-block-height,
+        expires-at: (+ stacks-block-height duration),
+        recovery-phrase: recovery-phrase,
+        is-used: false
+      }
+    )
+    (var-set next-backup-id (+ backup-id u1))
+    (ok backup-id)
+  )
+)
+
+(define-public (recover-credentials (backup-id uint) (recovery-phrase (buff 32)))
+  (let ((user tx-sender)
+        (backup (unwrap! (map-get? credential-backups { user: user, backup-id: backup-id }) ERR_BACKUP_NOT_FOUND))
+        (verification-hash (sha256 recovery-phrase)))
+    (asserts! (> (get expires-at backup) stacks-block-height) ERR_BACKUP_EXPIRED)
+    (asserts! (not (get is-used backup)) ERR_BACKUP_NOT_FOUND)
+    (asserts! (is-eq (get backup-hash backup) verification-hash) ERR_INVALID_BACKUP)
+    (map-set credential-backups
+      { user: user, backup-id: backup-id }
+      (merge backup { is-used: true })
+    )
+    (ok (get credential-ids backup))
+  )
+)
+
+(define-public (extend-backup (backup-id uint) (additional-duration uint))
+  (let ((user tx-sender)
+        (backup (unwrap! (map-get? credential-backups { user: user, backup-id: backup-id }) ERR_BACKUP_NOT_FOUND)))
+    (asserts! (> (get expires-at backup) stacks-block-height) ERR_BACKUP_EXPIRED)
+    (asserts! (not (get is-used backup)) ERR_BACKUP_NOT_FOUND)
+    (map-set credential-backups
+      { user: user, backup-id: backup-id }
+      (merge backup { expires-at: (+ (get expires-at backup) additional-duration) })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-backup (user principal) (backup-id uint))
+  (map-get? credential-backups { user: user, backup-id: backup-id })
+)
+
+(define-read-only (is-backup-valid (user principal) (backup-id uint))
+  (match (map-get? credential-backups { user: user, backup-id: backup-id })
+    backup (and (> (get expires-at backup) stacks-block-height) (not (get is-used backup)))
+    false
   )
 )
