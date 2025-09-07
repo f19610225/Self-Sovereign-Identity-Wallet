@@ -450,3 +450,110 @@
     false
   )
 )
+
+(define-map credential-analytics
+  { user: principal, credential-id: (string-ascii 64) }
+  {
+    access-count: uint,
+    verification-requests: uint,
+    last-accessed: uint,
+    most-common-requester: (optional principal)
+  }
+)
+
+(define-map issuer-analytics
+  { issuer: principal }
+  {
+    total-credentials-issued: uint,
+    total-verifications: uint,
+    active-credentials: uint,
+    last-activity: uint
+  }
+)
+
+(define-map system-analytics
+  principal
+  {
+    popular-credential-types: (list 5 (string-ascii 32)),
+    total-users: uint,
+    total-credentials: uint,
+    total-verifications: uint,
+    last-updated: uint
+  }
+)
+
+(define-public (track-credential-access (owner principal) (credential-id (string-ascii 64)) (requester principal))
+  (let ((current-analytics (default-to { access-count: u0, verification-requests: u0, last-accessed: u0, most-common-requester: none }
+                                       (map-get? credential-analytics { user: owner, credential-id: credential-id }))))
+    (map-set credential-analytics
+      { user: owner, credential-id: credential-id }
+      (merge current-analytics
+        {
+          access-count: (+ (get access-count current-analytics) u1),
+          last-accessed: stacks-block-height,
+          most-common-requester: (some requester)
+        }
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (track-verification-request (owner principal) (credential-id (string-ascii 64)))
+  (let ((current-analytics (default-to { access-count: u0, verification-requests: u0, last-accessed: u0, most-common-requester: none }
+                                       (map-get? credential-analytics { user: owner, credential-id: credential-id }))))
+    (map-set credential-analytics
+      { user: owner, credential-id: credential-id }
+      (merge current-analytics { verification-requests: (+ (get verification-requests current-analytics) u1) })
+    )
+    (ok true)
+  )
+)
+
+(define-public (update-issuer-analytics (issuer principal) (credential-issued bool) (verification-done bool))
+  (let ((current-stats (default-to { total-credentials-issued: u0, total-verifications: u0, active-credentials: u0, last-activity: u0 }
+                                   (map-get? issuer-analytics { issuer: issuer }))))
+    (map-set issuer-analytics
+      { issuer: issuer }
+      {
+        total-credentials-issued: (if credential-issued (+ (get total-credentials-issued current-stats) u1) (get total-credentials-issued current-stats)),
+        total-verifications: (if verification-done (+ (get total-verifications current-stats) u1) (get total-verifications current-stats)),
+        active-credentials: (+ (get active-credentials current-stats) u1),
+        last-activity: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-credential-analytics (user principal) (credential-id (string-ascii 64)))
+  (map-get? credential-analytics { user: user, credential-id: credential-id })
+)
+
+(define-read-only (get-issuer-analytics (issuer principal))
+  (map-get? issuer-analytics { issuer: issuer })
+)
+
+(define-read-only (get-system-analytics)
+  (map-get? system-analytics tx-sender)
+)
+
+(define-read-only (get-most-active-credential (user principal) (credential-list (list 10 (string-ascii 64))))
+  (let ((analytics-list (map get-credential-access-count credential-list)))
+    (fold find-max-access analytics-list { max-access: u0, credential: "" })
+  )
+)
+
+(define-private (get-credential-access-count (credential-id (string-ascii 64)))
+  (match (get-credential-analytics tx-sender credential-id)
+    analytics (get access-count analytics)
+    u0
+  )
+)
+
+(define-private (find-max-access (access-count uint) (accumulator { max-access: uint, credential: (string-ascii 64) }))
+  (if (> access-count (get max-access accumulator))
+    { max-access: access-count, credential: "" }
+    accumulator
+  )
+)
