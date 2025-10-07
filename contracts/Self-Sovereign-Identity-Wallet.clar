@@ -10,6 +10,12 @@
 (define-constant ERR_BACKUP_NOT_FOUND (err u110))
 (define-constant ERR_BACKUP_EXPIRED (err u111))
 
+
+(define-constant ERR_DELEGATION_EXISTS (err u112))
+(define-constant ERR_DELEGATION_NOT_FOUND (err u113))
+(define-constant ERR_DELEGATION_EXPIRED (err u114))
+(define-constant ERR_MAX_DELEGATIONS (err u115))
+
 (define-data-var min-rating uint u1)
 (define-data-var max-rating uint u5)
 
@@ -556,4 +562,71 @@
     { max-access: access-count, credential: "" }
     accumulator
   )
+)
+
+(define-map credential-delegations
+  { owner: principal, credential-id: (string-ascii 64), delegate: principal }
+  {
+    granted-at: uint,
+    expires-at: uint,
+    delegation-level: uint,
+    can-redelegate: bool,
+    is-active: bool,
+    usage-count: uint
+  }
+)
+
+(define-map delegation-chains
+  { delegation-id: uint }
+  {
+    original-owner: principal,
+    current-delegate: principal,
+    credential-id: (string-ascii 64),
+    chain-depth: uint,
+    created-at: uint
+  }
+)
+
+(define-data-var next-delegation-id uint u1)
+
+(define-public (delegate-credential (credential-id (string-ascii 64)) (delegate principal) (duration uint) (can-redelegate bool))
+  (let ((owner tx-sender))
+    (asserts! (is-some (map-get? credentials { user: owner, credential-id: credential-id })) ERR_NOT_FOUND)
+    (asserts! (is-none (map-get? credential-delegations { owner: owner, credential-id: credential-id, delegate: delegate })) ERR_DELEGATION_EXISTS)
+    (map-set credential-delegations
+      { owner: owner, credential-id: credential-id, delegate: delegate }
+      {
+        granted-at: stacks-block-height,
+        expires-at: (+ stacks-block-height duration),
+        delegation-level: u1,
+        can-redelegate: can-redelegate,
+        is-active: true,
+        usage-count: u0
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (credential-id (string-ascii 64)) (delegate principal))
+  (let ((owner tx-sender))
+    (asserts! (is-some (map-get? credential-delegations { owner: owner, credential-id: credential-id, delegate: delegate })) ERR_DELEGATION_NOT_FOUND)
+    (map-delete credential-delegations { owner: owner, credential-id: credential-id, delegate: delegate })
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation (owner principal) (credential-id (string-ascii 64)) (delegate principal))
+  (let ((delegation (map-get? credential-delegations { owner: owner, credential-id: credential-id, delegate: delegate })))
+    (match delegation
+      del (if (and (get is-active del) (> (get expires-at del) stacks-block-height))
+             (some del)
+             none)
+      none
+    )
+  )
+)
+
+(define-read-only (is-delegated (owner principal) (credential-id (string-ascii 64)) (delegate principal))
+  (is-some (get-delegation owner credential-id delegate))
 )
