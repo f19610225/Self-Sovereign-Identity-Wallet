@@ -16,6 +16,13 @@
 (define-constant ERR_DELEGATION_EXPIRED (err u114))
 (define-constant ERR_MAX_DELEGATIONS (err u115))
 
+(define-constant ERR_DISPUTE_EXISTS (err u116))
+(define-constant ERR_DISPUTE_NOT_FOUND (err u117))
+(define-constant ERR_ALREADY_VOTED (err u118))
+(define-constant ERR_DISPUTE_CLOSED (err u119))
+(define-constant MIN_STAKE u100)
+(define-constant VOTING_PERIOD u144)
+
 (define-data-var min-rating uint u1)
 (define-data-var max-rating uint u5)
 
@@ -629,4 +636,114 @@
 
 (define-read-only (is-delegated (owner principal) (credential-id (string-ascii 64)) (delegate principal))
   (is-some (get-delegation owner credential-id delegate))
+)
+
+(define-map credential-disputes
+  { dispute-id: uint }
+  {
+    disputer: principal,
+    credential-owner: principal,
+    credential-id: (string-ascii 64),
+    reason: (string-ascii 256),
+    evidence-hash: (buff 32),
+    created-at: uint,
+    voting-ends-at: uint,
+    status: (string-ascii 16),
+    votes-for: uint,
+    votes-against: uint,
+    total-stake-for: uint,
+    total-stake-against: uint
+  }
+)
+
+(define-map dispute-votes
+  { dispute-id: uint, voter: principal }
+  {
+    vote: bool,
+    stake-amount: uint,
+    voted-at: uint
+  }
+)
+
+(define-data-var next-dispute-id uint u1)
+
+(define-public (file-dispute (credential-owner principal) (credential-id (string-ascii 64)) (reason (string-ascii 256)) (evidence-hash (buff 32)))
+  (let ((dispute-id (var-get next-dispute-id))
+        (disputer tx-sender))
+    (asserts! (is-some (map-get? credentials { user: credential-owner, credential-id: credential-id })) ERR_NOT_FOUND)
+    (map-set credential-disputes
+      { dispute-id: dispute-id }
+      {
+        disputer: disputer,
+        credential-owner: credential-owner,
+        credential-id: credential-id,
+        reason: reason,
+        evidence-hash: evidence-hash,
+        created-at: stacks-block-height,
+        voting-ends-at: (+ stacks-block-height VOTING_PERIOD),
+        status: "active",
+        votes-for: u0,
+        votes-against: u0,
+        total-stake-for: u0,
+        total-stake-against: u0
+      }
+    )
+    (var-set next-dispute-id (+ dispute-id u1))
+    (ok dispute-id)
+  )
+)
+
+(define-public (vote-on-dispute (dispute-id uint) (support-dispute bool) (stake-amount uint))
+  (let ((voter tx-sender)
+        (dispute (unwrap! (map-get? credential-disputes { dispute-id: dispute-id }) ERR_DISPUTE_NOT_FOUND)))
+    (asserts! (is-eq (get status dispute) "active") ERR_DISPUTE_CLOSED)
+    (asserts! (> (get voting-ends-at dispute) stacks-block-height) ERR_EXPIRED)
+    (asserts! (>= stake-amount MIN_STAKE) ERR_UNAUTHORIZED)
+    (asserts! (is-none (map-get? dispute-votes { dispute-id: dispute-id, voter: voter })) ERR_ALREADY_VOTED)
+    (map-set dispute-votes
+      { dispute-id: dispute-id, voter: voter }
+      { vote: support-dispute, stake-amount: stake-amount, voted-at: stacks-block-height }
+    )
+    (map-set credential-disputes
+      { dispute-id: dispute-id }
+      (merge dispute
+        {
+          votes-for: (if support-dispute (+ (get votes-for dispute) u1) (get votes-for dispute)),
+          votes-against: (if support-dispute (get votes-against dispute) (+ (get votes-against dispute) u1)),
+          total-stake-for: (if support-dispute (+ (get total-stake-for dispute) stake-amount) (get total-stake-for dispute)),
+          total-stake-against: (if support-dispute (get total-stake-against dispute) (+ (get total-stake-against dispute) stake-amount))
+        }
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (resolve-dispute (dispute-id uint))
+  (let ((dispute (unwrap! (map-get? credential-disputes { dispute-id: dispute-id }) ERR_DISPUTE_NOT_FOUND)))
+    (asserts! (<= (get voting-ends-at dispute) stacks-block-height) ERR_INVALID_CREDENTIAL)
+    (asserts! (is-eq (get status dispute) "active") ERR_DISPUTE_CLOSED)
+    (let ((result (if (> (get total-stake-for dispute) (get total-stake-against dispute)) "upheld" "rejected")))
+      (map-set credential-disputes
+        { dispute-id: dispute-id }
+        (merge dispute { status: result })
+      )
+      (ok result)
+    )
+  )
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+  (map-get? credential-disputes { dispute-id: dispute-id })
+)
+
+(define-read-only (get-vote (dispute-id uint) (voter principal))
+  (map-get? dispute-votes { dispute-id: dispute-id, voter: voter })
+)
+
+(define-read-only (is-dispute-active (dispute-id uint))
+  (match (map-get? credential-disputes { dispute-id: dispute-id })
+    dispute (and (is-eq (get status dispute) "active") (> (get voting-ends-at dispute) stacks-block-height))
+    false
+  )
 )
